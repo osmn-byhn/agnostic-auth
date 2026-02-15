@@ -1,19 +1,39 @@
-import { UserRepository } from "../interfaces/UserRepository";
-import { hash } from "../crypto";
+import { AuthAdapter } from "../interfaces/AuthAdapter";
+import { PasswordHasher } from "../interfaces/AuthStrategies";
+import { UserExistsError } from "../errors/AuthErrors";
+import { randomBytes } from "crypto";
 
 export class Register {
-  constructor(private repo: UserRepository) {}
+  constructor(
+    private adapter: AuthAdapter,
+    private hasher: PasswordHasher,
+    private config: { identityField?: string } = {}
+  ) { }
 
-  async execute(email: string, password: string) {
-    const exists = await this.repo.findByEmail(email);
-    if (exists) throw new Error("User already exists");
+  async execute(credentials: { [key: string]: any }, password: string, extraFields: { [key: string]: any } = {}) {
+    const identityField = this.config.identityField || "email";
+    const identityValue = credentials[identityField];
 
-    const passwordHash = await hash(password);
+    if (!identityValue || !password) {
+      throw new Error(`${identityField} and password are required`);
+    }
 
-    return this.repo.create({
-      email,
+    const existingUser = await this.adapter.findUnique({ [identityField]: identityValue });
+    if (existingUser) {
+      throw new UserExistsError(`User with this ${identityField} already exists`);
+    }
+
+    const passwordHash = await this.hasher.hash(password);
+    const verificationToken = randomBytes(32).toString("hex");
+
+    return this.adapter.create({
+      ...extraFields,
+      [identityField]: identityValue,
       passwordHash,
       createdAt: new Date(),
-    });
+      isVerified: false,
+      verificationToken,
+      failedLoginAttempts: 0,
+    } as any);
   }
 }

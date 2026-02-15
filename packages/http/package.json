@@ -5,14 +5,29 @@
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts"
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsx src/index.ts"
   },
   "keywords": [],
   "author": "osmn-byhn",
   "license": "ISC",
   "packageManager": "pnpm@10.24.0",
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
     "tsup": "^8.5.1",
+    "tsx": "latest",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@agauth/core": "workspace:*",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "zod": "^4.3.6"
   }
 }
