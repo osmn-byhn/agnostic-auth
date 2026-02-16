@@ -1,6 +1,7 @@
 import { AuthAdapter } from "../interfaces/AuthAdapter";
 import { PasswordHasher, TokenBlacklist } from "../interfaces/AuthStrategies";
 import { InvalidCredentialsError, TokenExpiredError, UnauthorizedError } from "../errors/AuthErrors";
+import { OtpRepository, SmsProvider, EmailProvider } from "../interfaces/CommunicationInterfaces";
 import { randomBytes } from "crypto";
 
 export class VerifyEmail {
@@ -10,26 +11,44 @@ export class VerifyEmail {
         const user = await this.adapter.findUnique({ verificationToken: token });
         if (!user) throw new Error("Invalid or expired verification token");
 
-        await this.adapter.update(user.id, { isVerified: true, verificationToken: undefined });
+        await this.adapter.update(user.id, { isEmailVerified: true, verificationToken: undefined } as any);
     }
 }
 
 export class ForgotPassword {
-    constructor(private adapter: AuthAdapter) { }
+    constructor(
+        private adapter: AuthAdapter,
+        private emailProvider?: EmailProvider,
+        private smsProvider?: SmsProvider,
+        private otpRepo?: OtpRepository
+    ) { }
 
-    async execute(identity: { [key: string]: any }, identityField: string = "email") {
-        const user = await this.adapter.findUnique({ [identityField]: identity[identityField] });
-        if (!user) return null; // Silent failure for security
+    async execute(identity: { [key: string]: any }, method: "email" | "sms" = "email") {
+        const user = await this.adapter.findUnique(identity); // Uses identity object directly
+        if (!user) return null;
 
-        const resetToken = randomBytes(32).toString("hex");
-        const resetExpires = new Date(Date.now() + 3600000); // 1 hour
+        const token = randomBytes(32).toString("hex");
+        const expiresAt = new Date(Date.now() + 3600000); // 1 hour
 
         await this.adapter.update(user.id, {
-            resetPasswordToken: resetToken,
-            resetPasswordExpires: resetExpires,
-        });
+            resetPasswordToken: token,
+            resetPasswordExpires: expiresAt
+        } as any);
 
-        return resetToken;
+        if (method === "email" && this.emailProvider) {
+            await this.emailProvider.sendEmail(
+                (user as any).email,
+                "Password Reset",
+                `Use this link: /reset-password?token=${token}`
+            );
+        } else if (method === "sms" && this.smsProvider && this.otpRepo && user.phoneNumber) {
+            const code = Math.floor(100000 + Math.random() * 900000).toString();
+            await this.otpRepo.save(user.phoneNumber, code, expiresAt);
+            await this.smsProvider.sendSms(user.phoneNumber, `Your password reset code: ${code}`);
+            return code;
+        }
+
+        return token;
     }
 }
 

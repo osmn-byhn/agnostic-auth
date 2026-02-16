@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from "express";
+import { Request, Response, NextFunction, CookieOptions } from "express";
 import { AuthRequest, AuthResponse } from "@agauth/core";
 
 export class ExpressAdapter {
@@ -18,7 +18,7 @@ export class ExpressAdapter {
     static fromAuthResponse(res: Response, authRes: AuthResponse) {
         if (authRes.cookies) {
             authRes.cookies.forEach(cookie => {
-                res.cookie(cookie.name, cookie.value, cookie.options);
+                res.cookie(cookie.name, cookie.value, cookie.options || {});
             });
         }
 

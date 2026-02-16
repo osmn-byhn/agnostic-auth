@@ -1,41 +1,44 @@
-import { FastifyRequest, FastifyReply } from "fastify";
+import { Request, ResponseToolkit } from "@hapi/hapi";
 import { AuthRequest, AuthResponse } from "@agauth/core";
 
-export class FastifyAdapter {
-    static toAuthRequest(req: FastifyRequest): AuthRequest {
+export class HapiAdapter {
+    static toAuthRequest(req: Request): AuthRequest {
         return {
-            body: req.body,
+            body: req.payload,
             headers: req.headers as { [key: string]: string },
             query: req.query as { [key: string]: string },
-            ip: req.ip,
+            ip: req.info.remoteAddress,
             userAgent: req.headers["user-agent"],
-            cookies: (req as any).cookies || {},
+            cookies: req.state || {},
             method: req.method,
-            url: req.url
+            url: req.url.toString()
         };
     }
 
-    static fromAuthResponse(reply: FastifyReply, authRes: AuthResponse) {
+    static fromAuthResponse(h: ResponseToolkit, authRes: AuthResponse) {
+        let response = h.response(authRes.body).code(authRes.status);
+
         if (authRes.cookies) {
             authRes.cookies.forEach(cookie => {
-                reply.setCookie(cookie.name, cookie.value, (cookie.options || {}) as any);
+                response.state(cookie.name, cookie.value, cookie.options as any);
             });
         }
 
         if (authRes.headers) {
             Object.entries(authRes.headers).forEach(([key, value]) => {
-                reply.header(key, value);
+                response.header(key, value);
             });
         }
 
-        return reply.status(authRes.status).send(authRes.body);
+        return response;
     }
 
     static createHandler(agnosticHandler: (req: AuthRequest) => Promise<AuthResponse>) {
-        return async (req: FastifyRequest, reply: FastifyReply) => {
+        return async (req: Request, h: ResponseToolkit) => {
             const authReq = this.toAuthRequest(req);
             const authRes = await agnosticHandler(authReq);
-            return this.fromAuthResponse(reply, authRes);
+            return this.fromAuthResponse(h, authRes);
         };
     }
 }
+
