@@ -1,6 +1,7 @@
 import { AuthAdapter } from "../interfaces/AuthAdapter";
 import { TokenProvider } from "../interfaces/AuthStrategies";
 import { UnauthorizedError } from "../errors/AuthErrors";
+import { sha256 } from "../crypto";
 
 export class RotateRefreshToken {
     constructor(
@@ -9,38 +10,40 @@ export class RotateRefreshToken {
     ) { }
 
     async execute(refreshToken: string, ip?: string, userAgent?: string, fingerprint?: string) {
-        // 1. Find session with this refreshTokenHash
-        const session = await this.adapter.findSession({ refreshTokenHash: refreshToken });
+        // 1. Hash the provided token for lookup
+        const hashedInput = sha256(refreshToken);
+        
+        // 2. Find session with this refreshTokenHash
+        const session = await this.adapter.findSession({ refreshTokenHash: hashedInput });
 
         if (!session || !session.isValid) {
             // Replay Attack detected! 
-            // If we find a session with this token but it's invalid, it might mean it was already rotated.
             if (session && !session.isValid) {
-                // Potential compromise: Revoke all user sessions for safety
+                // If we find a session with this token but it's invalid, it might mean it was already rotated (replay attack)
                 await this.adapter.deleteAllUserSessions(session.userId);
-                throw new UnauthorizedError("Security breach detected: Replay attack. All sessions revoked.");
+                throw new UnauthorizedError("Security breach detected: Replay attack. All sessions revoked for safety.");
             }
-            throw new UnauthorizedError("Invalid refresh token");
+            throw new UnauthorizedError("Invalid or expired refresh token");
         }
 
-        // 2. Check expiration
+        // 3. Check expiration
         if (new Date() > session.expiresAt) {
             await this.adapter.updateSession(session.id, { isValid: false });
             throw new UnauthorizedError("Refresh token expired");
         }
 
-        // 3. Detect suspicious activity (IP/Fingerprint change)
+        // 4. Detect suspicious activity (IP/Fingerprint change)
         if (session.ip && ip && session.ip !== ip) {
-            // Log suspicious activity, maybe trigger additional check
             console.warn(`Suspicious login detected for user ${session.userId}: IP changed from ${session.ip} to ${ip}`);
         }
 
-        // 4. Rotate: Create new token and update session
+        // 5. Rotate: Create new tokens and update session
         const newRefreshToken = this.tokenProvider.sign({ userId: session.userId }, { expiresIn: "7d" });
         const newAccessToken = this.tokenProvider.sign({ userId: session.userId }, { expiresIn: "15m" });
 
+        // Hash the NEW refresh token before storing it
         await this.adapter.updateSession(session.id, {
-            refreshTokenHash: newRefreshToken, // Rotation
+            refreshTokenHash: sha256(newRefreshToken),
             lastActiveAt: new Date(),
             ip,
             userAgent,

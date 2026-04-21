@@ -12,8 +12,14 @@ export class InvalidCredentialsError extends AuthError {
 }
 
 export class AccountLockedError extends AuthError {
-    constructor(message: string) {
+    constructor(message: string = "Account is temporarily locked") {
         super(message, 403, "ACCOUNT_LOCKED");
+    }
+}
+
+export class TooManyRequestsError extends AuthError {
+    constructor(message: string = "Too many requests, please try again later", public retryAfter?: number) {
+        super(message, 429, "TOO_MANY_REQUESTS");
     }
 }
 

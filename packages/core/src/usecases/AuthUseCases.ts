@@ -1,8 +1,9 @@
 import { AuthAdapter } from "../interfaces/AuthAdapter";
 import { PasswordHasher, TokenBlacklist } from "../interfaces/AuthStrategies";
 import { InvalidCredentialsError, TokenExpiredError, UnauthorizedError } from "../errors/AuthErrors";
-import { OtpRepository, SmsProvider, EmailProvider } from "../interfaces/CommunicationInterfaces";
+import { OtpManager, EmailProvider, PhoneNormalizer } from "@agauth/verify";
 import { randomBytes } from "crypto";
+import { sha256 } from "../crypto";
 
 export class VerifyEmail {
     constructor(private adapter: AuthAdapter) { }
@@ -19,8 +20,8 @@ export class ForgotPassword {
     constructor(
         private adapter: AuthAdapter,
         private emailProvider?: EmailProvider,
-        private smsProvider?: SmsProvider,
-        private otpRepo?: OtpRepository
+        private otpManager?: OtpManager,
+        private config: { resetUrl?: string; expirationMinutes?: number } = {}
     ) { }
 
     async execute(identity: { [key: string]: any }, method: "email" | "sms" = "email") {
@@ -28,23 +29,25 @@ export class ForgotPassword {
         if (!user) return null;
 
         const token = randomBytes(32).toString("hex");
-        const expiresAt = new Date(Date.now() + 3600000); // 1 hour
+        const hashedToken = sha256(token);
+        const expiration = this.config.expirationMinutes || 60;
+        const expiresAt = new Date(Date.now() + expiration * 60000);
 
         await this.adapter.update(user.id, {
-            resetPasswordToken: token,
+            resetPasswordToken: hashedToken,
             resetPasswordExpires: expiresAt
         } as any);
 
         if (method === "email" && this.emailProvider) {
+            const url = (this.config.resetUrl || "/reset-password?token=") + token;
             await this.emailProvider.sendEmail(
                 (user as any).email,
                 "Password Reset",
-                `Use this link: /reset-password?token=${token}`
+                `Please click here to reset your password: ${url}`
             );
-        } else if (method === "sms" && this.smsProvider && this.otpRepo && user.phoneNumber) {
-            const code = Math.floor(100000 + Math.random() * 900000).toString();
-            await this.otpRepo.save(user.phoneNumber, code, expiresAt);
-            await this.smsProvider.sendSms(user.phoneNumber, `Your password reset code: ${code}`);
+        } else if (method === "sms" && this.otpManager && user.phoneNumber) {
+            const normalizedPhone = PhoneNormalizer.normalize(user.phoneNumber);
+            const code = await this.otpManager.sendOtp(normalizedPhone, "sms");
             return code;
         }
 
@@ -56,7 +59,8 @@ export class ResetPassword {
     constructor(private adapter: AuthAdapter, private hasher: PasswordHasher) { }
 
     async execute(token: string, newPassword: string) {
-        const user = await this.adapter.findUnique({ resetPasswordToken: token });
+        const hashedToken = sha256(token);
+        const user = await this.adapter.findUnique({ resetPasswordToken: hashedToken });
 
         if (!user || (user.resetPasswordExpires && user.resetPasswordExpires < new Date())) {
             throw new TokenExpiredError("Invalid or expired reset token");
@@ -87,5 +91,50 @@ export class IsTokenBlacklisted {
 
     async execute(token: string): Promise<boolean> {
         return this.blacklist.isBlacklisted(token);
+    }
+}
+
+export class ResendVerificationEmail {
+    constructor(
+        private adapter: AuthAdapter,
+        private emailProvider: EmailProvider,
+        private config: { verificationUrl?: string } = {}
+    ) { }
+
+    async execute(identity: { [key: string]: any }) {
+        const user = await this.adapter.findUnique(identity);
+        if (!user) return;
+
+        if ((user as any).isEmailVerified) {
+            throw new Error("Email is already verified");
+        }
+
+        const verificationToken = randomBytes(32).toString("hex");
+        await this.adapter.update(user.id, { verificationToken } as any);
+
+        const email = (identity as any).email || (user as any).email;
+        if (email && email.includes("@")) {
+            const url = (this.config.verificationUrl || "/verify-email?token=") + verificationToken;
+            await this.emailProvider.sendEmail(
+                email,
+                "Verify your email",
+                `Please click here to verify your email: ${url}`
+            );
+        }
+    }
+}
+
+export class ValidateResetToken {
+    constructor(private adapter: AuthAdapter) { }
+
+    async execute(token: string): Promise<boolean> {
+        const hashedToken = sha256(token);
+        const user = await this.adapter.findUnique({ resetPasswordToken: hashedToken });
+
+        if (!user || (user.resetPasswordExpires && user.resetPasswordExpires < new Date())) {
+            return false;
+        }
+
+        return true;
     }
 }

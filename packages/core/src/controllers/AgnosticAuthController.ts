@@ -2,22 +2,31 @@ import { AuthRequest, AuthResponse } from "../interfaces/AgnosticHttp";
 import { Login } from "../usecases/Login";
 import { Register } from "../usecases/Register";
 import { TokenProvider } from "../interfaces/AuthStrategies";
-import { AuthError, UnauthorizedError, InvalidCredentialsError } from "../errors/AuthErrors";
-import { Logout, VerifyEmail, ForgotPassword, ResetPassword } from "../usecases/AuthUseCases";
-import { SessionManager, VerifyTOTP, GenerateTOTPSecret } from "../usecases/SecurityUseCases";
+import { AuthError, UnauthorizedError, InvalidCredentialsError, TooManyRequestsError } from "../errors/AuthErrors";
+import { Logout, VerifyEmail, ForgotPassword, ResetPassword, ResendVerificationEmail, ValidateResetToken } from "../usecases/AuthUseCases";
+import { SessionManager, VerifyTOTP, GenerateTOTPSecret, UnlockAccount } from "../usecases/SecurityUseCases";
+import { GenerateAuthTokens } from "../usecases/AuthTokens";
+import { RotateRefreshToken } from "../usecases/RotationUseCases";
+import { RateLimiter } from "../interfaces/RateLimiter";
+import { sha256 } from "../crypto";
 
 export class AgnosticAuthController {
     constructor(
         private register: Register,
         private login: Login,
         private verifyEmail: VerifyEmail,
+        private resendVerification: ResendVerificationEmail,
         private forgotPassword: ForgotPassword,
         private resetPassword: ResetPassword,
+        private validateResetToken: ValidateResetToken,
         private logout: Logout,
         private sessionManager: SessionManager,
         private verifyTOTP: VerifyTOTP,
         private generateTOTP: GenerateTOTPSecret,
-        private rotateRefreshToken: any,
+        private unlockAccount: UnlockAccount,
+        private rotateRefreshToken: RotateRefreshToken,
+        private generateAuthTokens: GenerateAuthTokens,
+        private rateLimiter: RateLimiter,
         private otpManager: any,
         private verifyOtp: any,
         private tokenProvider: TokenProvider,
@@ -29,23 +38,16 @@ export class AgnosticAuthController {
     ) { }
 
     private async generateTokens(userId: string, req: AuthRequest) {
-        const accessToken = this.tokenProvider.sign({ userId }, { expiresIn: "15m" });
-        const refreshToken = this.tokenProvider.sign({ userId }, { expiresIn: "7d" });
-
-        // Create session
-        await this.sessionManager.createSession(
-            userId,
-            refreshToken,
-            req.ip,
-            req.userAgent,
-            req.body.fingerprint // Expect fingerprint from client
-        );
-
-        return { accessToken, refreshToken };
+        return this.generateAuthTokens.execute(userId, {
+            ip: req.ip,
+            userAgent: req.userAgent,
+            fingerprint: req.body.fingerprint
+        });
     }
 
     async registerHandler(req: AuthRequest): Promise<AuthResponse> {
         try {
+            await this.checkRateLimit(req, "register");
             const { password, extraFields, ...credentials } = req.body;
             const user = await this.register.execute(credentials, password, extraFields);
 
@@ -67,6 +69,7 @@ export class AgnosticAuthController {
 
     async loginHandler(req: AuthRequest): Promise<AuthResponse> {
         try {
+            await this.checkRateLimit(req, "login");
             const { password, ...credentials } = req.body;
             const user = await this.login.execute(credentials, password, req.ip, req.userAgent);
 
@@ -134,7 +137,7 @@ export class AgnosticAuthController {
             const refreshToken = req.cookies?.refreshToken;
             if (!refreshToken) throw new UnauthorizedError("No refresh token provided");
 
-            const { accessToken, refreshToken: newRefreshToken } = await (this as any).rotateRefreshToken.execute(
+            const { accessToken, refreshToken: newRefreshToken } = await this.rotateRefreshToken.execute(
                 refreshToken,
                 req.ip,
                 req.userAgent,
@@ -225,6 +228,57 @@ export class AgnosticAuthController {
         }
     }
 
+    async listSessionsHandler(req: AuthRequest): Promise<AuthResponse> {
+        try {
+            const { userId } = (req as any).user;
+            const sessions = await this.sessionManager.getActiveSessions(userId);
+
+            const refreshToken = req.cookies?.refreshToken;
+            const currentSession = refreshToken ? await (this.login as any).adapter.findSession({ refreshTokenHash: sha256(refreshToken) }) : null;
+
+            return {
+                status: 200,
+                body: sessions.map(s => ({
+                    id: s.id,
+                    ip: s.ip,
+                    userAgent: s.userAgent,
+                    lastActiveAt: s.lastActiveAt,
+                    isCurrent: currentSession ? s.id === currentSession.id : false,
+                    createdAt: s.createdAt
+                }))
+            };
+        } catch (error: any) {
+            return this.handleError(error);
+        }
+    }
+
+    async revokeSessionHandler(req: AuthRequest): Promise<AuthResponse> {
+        try {
+            const { userId } = (req as any).user;
+            const { sessionId } = req.body;
+            await this.sessionManager.revokeSpecificSession(userId, sessionId);
+            return { status: 204 };
+        } catch (error: any) {
+            return this.handleError(error);
+        }
+    }
+
+    async revokeOtherSessionsHandler(req: AuthRequest): Promise<AuthResponse> {
+        try {
+            const { userId } = (req as any).user;
+            const refreshToken = req.cookies?.refreshToken;
+            if (!refreshToken) throw new UnauthorizedError("Current session not found");
+
+            const currentSession = await (this.login as any).adapter.findSession({ refreshTokenHash: sha256(refreshToken) });
+            if (!currentSession) throw new UnauthorizedError("Session invalid");
+
+            await this.sessionManager.revokeOtherSessions(userId, currentSession.id);
+            return { status: 204 };
+        } catch (error: any) {
+            return this.handleError(error);
+        }
+    }
+
     async verifyEmailHandler(req: AuthRequest): Promise<AuthResponse> {
         try {
             const { token } = req.query;
@@ -239,6 +293,33 @@ export class AgnosticAuthController {
         }
     }
 
+    async resendVerificationHandler(req: AuthRequest): Promise<AuthResponse> {
+        try {
+            const { ...credentials } = req.body;
+            await this.resendVerification.execute(credentials);
+            return {
+                status: 200,
+                body: { message: "Verification email resent if account exists" }
+            };
+        } catch (error: any) {
+            return this.handleError(error);
+        }
+    }
+
+    async unlockAccountHandler(req: AuthRequest): Promise<AuthResponse> {
+        try {
+            const { token } = req.query;
+            if (typeof token !== "string") throw new Error("Token is required");
+            await this.unlockAccount.execute(token);
+            return {
+                status: 200,
+                body: { message: "Account unlocked successfully. You can now log in." }
+            };
+        } catch (error: any) {
+            return this.handleError(error);
+        }
+    }
+
     async resetPasswordHandler(req: AuthRequest): Promise<AuthResponse> {
         try {
             const { token, newPassword } = req.body;
@@ -246,6 +327,20 @@ export class AgnosticAuthController {
             return {
                 status: 200,
                 body: { message: "Password reset successful" }
+            };
+        } catch (error: any) {
+            return this.handleError(error);
+        }
+    }
+
+    async validateResetTokenHandler(req: AuthRequest): Promise<AuthResponse> {
+        try {
+            const { token } = req.query;
+            if (typeof token !== "string") throw new Error("Token is required");
+            const isValid = await this.validateResetToken.execute(token);
+            return {
+                status: 200,
+                body: { isValid }
             };
         } catch (error: any) {
             return this.handleError(error);
@@ -268,11 +363,12 @@ export class AgnosticAuthController {
 
     async forgotPasswordHandler(req: AuthRequest): Promise<AuthResponse> {
         try {
+            await this.checkRateLimit(req, "forgot-password");
             const { method, ...credentials } = req.body;
-            const resetToken = await this.forgotPassword.execute(credentials, method);
+            await this.forgotPassword.execute(credentials, method);
             return {
                 status: 200,
-                body: { message: "If your account is registered, you will receive a reset link or code", debugToken: resetToken }
+                body: { message: "If your account is registered, you will receive a reset link or code" }
             };
         } catch (error: any) {
             return this.handleError(error);
@@ -281,13 +377,33 @@ export class AgnosticAuthController {
 
     private handleError(error: any): AuthResponse {
         const status = error instanceof AuthError ? error.status : 500;
-        return {
+        const response: AuthResponse = {
             status,
             body: {
                 error: error.message,
                 code: error instanceof AuthError ? error.code : "INTERNAL_ERROR"
             }
         };
+
+        if (error instanceof TooManyRequestsError && error.retryAfter) {
+            response.headers = {
+                "Retry-After": error.retryAfter.toString()
+            };
+        }
+
+        return response;
+    }
+
+    private async checkRateLimit(req: AuthRequest, suffix: string) {
+        if (!this.rateLimiter) return;
+        try {
+            await this.rateLimiter.consume(`${req.ip}:${suffix}`);
+        } catch (res: any) {
+            throw new TooManyRequestsError(
+                "Too many attempts. Please try again later.",
+                res.msBeforeNext ? Math.ceil(res.msBeforeNext / 1000) : undefined
+            );
+        }
     }
 }
 

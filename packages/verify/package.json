@@ -1,0 +1,25 @@
+{
+    "name": "@agauth/verify",
+    "version": "0.0.1",
+    "main": "dist/index.cjs",
+    "module": "dist/index.mjs",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsup src/index.ts --format cjs,esm --dts"
+    },
+    "keywords": [],
+    "author": "osmn-byhn",
+    "license": "ISC",
+    "dependencies": {
+        "amqplib": "^0.10.5",
+        "firebase-admin": "^13.6.1",
+        "nodemailer": "^6.10.0"
+    },
+    "devDependencies": {
+        "@types/amqplib": "^0.10.6",
+        "@types/node": "^25.2.3",
+        "@types/nodemailer": "^6.4.17",
+        "tsup": "^8.5.1",
+        "typescript": "^5.9.3"
+    }
+}
